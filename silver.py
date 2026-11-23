@@ -24,7 +24,7 @@ import pyarrow.parquet as pq
 
 BRONZE_DIR = Path(os.environ.get("BRONZE_DIR", "data/bronze/factures"))
 SILVER_DIR = Path(os.environ.get("SILVER_DIR", "data/silver"))
-SILVER_LONGEST_EDGE = int(os.environ.get("SILVER_LONGEST_EDGE", 800))  # réglage OCR retenu pour silver
+SILVER_LONGEST_EDGE = int(os.environ.get("SILVER_LONGEST_EDGE", 1540))  # réglage OCR retenu pour silver
 CENT = Decimal("0.01")
 TOLERANCE = Decimal("0.01")
 
