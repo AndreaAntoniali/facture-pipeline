@@ -1,118 +1,220 @@
 # De la facture scannée à l'agent IA
 
-Chaîne de traitement de factures fournisseurs PDF : téléchargement depuis S3, extraction du texte
-(natif ou OCR LightOnOCR-3), couches **bronze** et **silver** en Parquet, entrepôt SQL DuckDB.
+Chaîne de traitement de factures fournisseurs PDF, de bout en bout :
 
 ```
-S3 ──► landing (PDF) ──► bronze (texte brut, Parquet) ──► silver (tables typées, Parquet) ──► entrepôt DuckDB (vues)
+S3 ──► landing (PDF) ──► bronze (texte brut) ──► silver (tables typées) ──► entrepôt DuckDB ──► serveur MCP ──► IA
+        étape 1           étapes 2-3 (OCR)        étape 4                    étape 6            étape 7
 ```
 
-## Installation
+- Les factures **texte** sont lues directement. Les factures **scannées** passent par l'OCR **LightOnOCR-3** (Hyperfluid).
+- Les données sont stockées en **Parquet** (couches bronze et silver) et interrogées en SQL avec **DuckDB**.
+- Un **serveur MCP** en lecture seule les expose à une IA (Claude Code, Claude Desktop…).
+- Choix techniques, résultats et réponses aux questions de la consigne : voir **[RAPPORT.md](RAPPORT.md)**.
 
-Prérequis : [uv](https://docs.astral.sh/uv/) (il installe Python et les dépendances).
+---
+
+## 1. Prérequis
+
+| Outil | Pourquoi | Installation |
+|---|---|---|
+| [uv](https://docs.astral.sh/uv/) | installe Python 3.12 et toutes les dépendances | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Identifiants S3 Hyperfluid | télécharger les factures | fournis par l'enseignant |
+| Clé d'API Hyperfluid | appeler LightOnOCR-3 | console Hyperfluid → page du modèle → créer une clé |
+| *(facultatif)* DBeaver | consulter l'entrepôt en graphique | `flatpak install flathub io.dbeaver.DBeaverCommunity` |
+| *(facultatif)* Claude Code | discuter avec les données via MCP | [claude.com/claude-code](https://claude.com/claude-code) |
+
+## 2. Installation
 
 ```bash
-git clone <ce dépôt> && cd projet
-uv sync
-cp .env.example .env      # puis remplir les identifiants S3 et la clé d'API OCR
+git clone <url-du-depot>
+cd projet
+uv sync                       # crée .venv avec les versions exactes de uv.lock
+cp .env.example .env          # puis remplir le fichier .env
 ```
 
-## Lancer le pipeline
+Variables du `.env` (le fichier n'est **jamais commité**) :
 
-Toutes les commandes se lancent depuis le dossier `projet/`.
+| Variable | Valeur |
+|---|---|
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | identifiants S3 fournis |
+| `AWS_ENDPOINT_URL` | `https://dams-5.s3-gateway.console.hyperfluid.cloud` (déjà rempli) |
+| `AWS_DEFAULT_REGION`, `S3_BUCKET` | `default`, `factures` (déjà remplis) |
+| `OUT_DIR` | `data/landing/factures` (déjà rempli) |
+| `OCR_BASE_URL` | URL du point d'accès, indiquée sur la page du modèle LightOnOCR-3 (se termine par `/v1`) |
+| `OCR_API_KEY` | ta clé d'API Hyperfluid |
+| `OCR_MODEL` | nom du modèle indiqué sur la page (ex. `lightonocr-3-1b-test`) |
 
-| Étape | Commande | Résultat |
-|---|---|---|
-| 1. Télécharger les factures | `uv run --env-file .env python download_factures.py` | PDF dans `data/landing/factures/` |
-| 1. Détecter texte / image | `uv run --env-file .env python classify_factures.py` | `data/landing/manifest_factures.csv` |
-| 2. Tester l'OCR | voir `ocr.py` (`render_page`, `ocr_image`) | |
-| 3. Bronze (extraction) | `uv run --env-file .env python ocr.py` | `data/bronze/factures/run_*.parquet` |
-| 4. Silver | `uv run python silver.py` | `data/silver/{factures,lignes_facture,quarantaine}.parquet` |
-| 5. Évaluation OCR | `uv run python evaluation.py evaluer` | `eval/resultats.md` |
-| 6. Entrepôt | `uv run python entrepot.py init` | `data/entrepot.duckdb` (vues) |
-| 7. Serveur MCP | lancé par le client MCP (voir plus bas) | outils sur l'entrepôt |
+## 3. Lancer tout le pipeline
 
-Chaque étape est **incrémentale ou idempotente** : on peut tout relancer sans risque. Bronze ne
-retraite (ni ne ré-OCRise) aucun fichier déjà ingéré ; silver et l'entrepôt sont recalculés.
+Lance ces commandes **depuis le dossier `projet/`**, dans l'ordre. Le premier lancement prend environ **6 minutes**, essentiellement pour l'OCR des 50 scans.
 
-Réglages (variables d'environnement) : `OCR_LONGEST_EDGE` (résolution envoyée à l'OCR, 1540 par
-défaut), `SILVER_LONGEST_EDGE` (réglage OCR retenu pour silver, 1540 par défaut), `DATA_DIR`
-(dossier des données, `data` par défaut).
+```bash
+uv run --env-file .env python download_factures.py     # 1. télécharge les PDF       -> data/landing/factures/
+uv run --env-file .env python classify_factures.py     # 1. texte ou image ?          -> data/landing/manifest_factures.csv
+uv run --env-file .env python ocr.py                   # 3. extraction + OCR (bronze) -> data/bronze/factures/run_*.parquet
+uv run python silver.py                                # 4. tables typées + qualité   -> data/silver/*.parquet
+uv run python entrepot.py init                         # 6. vues SQL                  -> data/entrepot.duckdb
+```
 
-Tests : `uv run pytest`
+Chaque commande peut être **relancée sans risque** :
 
-## Interroger l'entrepôt (étape 6)
+| Commande | Comportement à la relance |
+|---|---|
+| `download_factures.py` | ne télécharge que les nouveaux fichiers |
+| `ocr.py` | ne retraite (et ne ré-OCRise) aucune facture déjà en bronze |
+| `silver.py` et `entrepot.py init` | recalculent tout, en quelques secondes et sans appel réseau |
 
-L'entrepôt est une base DuckDB qui ne contient **que des vues** sur les fichiers Parquet : les
-données n'existent qu'en un exemplaire (les Parquet), et chaque requête voit les dernières données
-sans rien reconstruire.
+Quand on relance `ocr.py`, la dernière ligne doit afficher `0 nouvelle(s), 100 déjà en bronze, 0 appel(s) OCR`.
+
+### Vérifier que tout fonctionne
+
+```bash
+uv run pytest                                          # 31 tests : silver, entrepôt, serveur MCP
+uv run python entrepot.py sql "SELECT statut, count(*) AS n, sum(total_ttc) AS ttc FROM silver.factures GROUP BY 1"
+```
+
+Résultat attendu : 100 factures au total (58 « Payée », 21 « En attente », 21 « En retard »).
+
+## 4. Détail des étapes
+
+### Étape 1 : récupérer et classer les factures
+- `download_factures.py` : `--list` liste le bucket sans rien télécharger.
+- `classify_factures.py` : une facture sans texte natif est classée « image » et devra passer par l'OCR.
+
+### Étape 2 : tester l'OCR sur une page
+Pour envoyer une page au modèle et afficher le texte reconnu et le temps de traitement :
+```bash
+uv run --env-file .env python -c "
+import pymupdf, ocr
+with pymupdf.open('data/landing/factures/facture_A-2025-0003_scan.pdf') as doc:
+    texte, duree = ocr.ocr_image(ocr.render_page(doc[0]))
+print(texte); print(f'--- {duree:.2f} s')"
+```
+
+### Étape 3 : bronze
+`ocr.py` extrait chaque facture, en texte natif ou en OCR, et ajoute un fichier `run_<date>.parquet` par lancement. Les fichiers existants ne sont jamais modifiés.
+
+Variables utiles :
+
+| Variable | Rôle |
+|---|---|
+| `OCR_LONGEST_EDGE` | résolution envoyée à l'OCR (1540 par défaut) |
+| `LIMIT=5` | ne traiter que 5 factures, pour un essai |
+| `BRONZE_DIR` | écrire ailleurs, pour un test |
+
+Si l'OCR est indisponible, les factures concernées sont affichées en erreur et **retraitées au lancement suivant**.
+
+### Étape 4 : silver
+`silver.py` produit `factures`, `lignes_facture` et `quarantaine` :
+- montants en `DECIMAL(12,2)` ;
+- colonne `statut_qualite` à `ok` ou `a_verifier`, avec la liste des `anomalies` ;
+- `SILVER_LONGEST_EDGE` choisit la résolution OCR utilisée pour les scans (1540 par défaut).
+
+### Étape 5 : évaluer l'OCR
+```bash
+uv run --env-file .env python evaluation.py preparer   # tire 20 scans, crée leurs images (déjà fait, résultat versionné)
+uv run python evaluation.py evaluer                    # précision champ par champ -> eval/resultats.md
+```
+`evaluer` compare 800 px et 1540 px. Il faut donc que les deux résolutions soient en bronze. Pour obtenir les extractions à 800 px :
+```bash
+OCR_LONGEST_EDGE=800 uv run --env-file .env python ocr.py
+```
+
+La vérité terrain est dans `eval/verite_terrain.csv`.
+
+### Étape 6 : interroger l'entrepôt
+
+L'entrepôt est une base DuckDB qui ne contient **que des vues** sur les fichiers Parquet. Les données n'existent qu'en un exemplaire, et chaque requête voit les dernières données.
 
 | Vue | Contenu |
 |---|---|
 | `bronze.extractions` | texte brut de chaque extraction (natif ou OCR, toutes résolutions) |
-| `silver.factures` | une ligne par facture (montants `DECIMAL(12,2)`, dates `DATE`, `statut_qualite`) |
+| `silver.factures` | une ligne par facture |
 | `silver.lignes_facture` | une ligne par article (jointure sur `numero`) |
-| `silver.quarantaine` | documents rejetés avec leur motif |
+| `silver.quarantaine` | documents rejetés, avec leur motif |
 
 **En ligne de commande :**
-
 ```bash
-uv run python entrepot.py sql "SELECT statut, count(*), sum(total_ttc) FROM silver.factures GROUP BY 1"
+uv run python entrepot.py sql "SELECT * FROM silver.factures WHERE statut_qualite = 'a_verifier'"
 ```
 
-**Depuis un programme Python :**
-
+**Depuis Python :**
 ```python
 from entrepot import connexion
-with connexion() as con:                     # connexion en lecture seule
-    print(con.sql("SELECT * FROM silver.factures WHERE statut = 'En retard'"))
+with connexion() as con:                     # toujours en lecture seule
+    print(con.sql("SELECT fournisseur, sum(total_ttc) FROM silver.factures GROUP BY 1"))
 ```
 
 **Depuis DBeaver :**
+1. *Nouvelle connexion* → **DuckDB**. DBeaver propose de télécharger le pilote : accepte.
+2. *Path* : le chemin absolu de `projet/data/entrepot.duckdb`.
+3. Onglet *Driver properties* : ajoute **`duckdb.read_only` = `true`**. C'est indispensable pour ne pas bloquer les autres programmes.
+4. Déplie `bronze` ou `silver`, puis *Vues*. Ou ouvre un éditeur SQL : `SELECT * FROM silver.factures;`
 
-1. Installer DBeaver Community (`flatpak install flathub io.dbeaver.DBeaverCommunity`).
-2. *Nouvelle connexion* → **DuckDB** (DBeaver propose de télécharger le pilote).
-3. *Path* : le chemin absolu de `projet/data/entrepot.duckdb`.
-4. Onglet *Driver properties* : ajouter **`duckdb.read_only` = `true`**.
-5. Tester avec `SELECT * FROM silver.factures LIMIT 10;`
+**Sur une autre machine ou dans un conteneur :** les vues contiennent des chemins absolus, et la base n'est pas versionnée. Régénère-la sur place, par exemple :
+```bash
+DATA_DIR=/data uv run python entrepot.py init
+```
 
-> **Pourquoi en lecture seule ?** DuckDB autorise plusieurs processus en lecture seule en même
-> temps, mais un seul en écriture. En lecture seule, DBeaver ouvert ne bloque ni le pipeline (qui
-> n'écrit que des Parquet, jamais dans la base), ni les autres programmes, ni `entrepot.py init`.
+### Étape 7 : le serveur MCP
 
-**Sur une autre machine ou dans un conteneur :** les vues contiennent des chemins absolus. La base
-n'est donc pas versionnée : on la régénère dans chaque environnement, par exemple
-`DATA_DIR=/data uv run python entrepot.py init` dans un conteneur dont les données sont montées sur `/data`.
-
-## Serveur MCP (étape 7)
-
-`serveur_mcp.py` expose l'entrepôt à une IA via le [Model Context Protocol](https://modelcontextprotocol.io/)
-(transport stdio, SDK officiel `mcp`). Toutes les réponses contiennent le **SQL réellement exécuté**
-(`sql`) et ses paramètres ; les montants sont renvoyés en chaînes exactes, jamais en flottants.
+`serveur_mcp.py` expose l'entrepôt en **lecture seule**. Chaque réponse contient le **SQL réellement exécuté**.
 
 | Outil | Rôle |
 |---|---|
 | `lister_factures` | factures filtrées (fournisseur, client, statut, catégorie, statut qualité, période) |
-| `totaux_factures` | nombre et sommes HT / TVA / TTC, mêmes filtres, regroupement optionnel (fournisseur, mois…) |
+| `totaux_factures` | nombre et sommes HT / TVA / TTC, avec regroupement optionnel (fournisseur, mois…) |
 | `detail_facture` | une facture et toutes ses lignes |
 | `schema_donnees` | vues, colonnes, types et descriptions |
-| `requete_sql` | SQL libre en lecture seule (500 lignes, 10 s maximum) |
+| `requete_sql` | SQL libre, un seul `SELECT` (500 lignes et 10 s au maximum) |
 
-**Sécurité :** valeurs des filtres toujours passées en paramètres (pas d'injection SQL) ; l'outil SQL
-libre n'accepte qu'**une** instruction `SELECT` (analysée par le parseur DuckDB) ; la connexion est en
-lecture seule, sans accès aux fichiers hors de `data/` (ni `.env`, ni `/etc`), configuration verrouillée.
-En cas d'erreur, l'outil renvoie `erreur` + `conseil` pour que le LLM se corrige.
+**Avec Claude Code :** le fichier `.mcp.json` du projet déclare déjà le serveur.
+```bash
+claude                        # lancé dans projet/ ; accepter le serveur « factures »
+```
+Vérifie avec `/mcp` que tu vois `factures · connected`, puis pose une question, par exemple « Quel est le montant TTC des factures en retard en 2025 ? ». `Ctrl+O` affiche le détail des appels et le SQL. Une conversation enregistrée est disponible dans [`eval/conversation_mcp.md`](eval/conversation_mcp.md).
 
-**Brancher sur Claude Code :** le fichier `.mcp.json` du projet déclare le serveur. Lancer `claude`
-dans `projet/`, accepter le serveur « factures », vérifier avec `/mcp`, puis poser une question.
-Exemple de conversation enregistrée : [`eval/conversation_mcp.md`](eval/conversation_mcp.md).
-
-**Brancher sur Claude Desktop :** dans `claude_desktop_config.json` :
-
+**Avec Claude Desktop :** ajoute ceci dans `claude_desktop_config.json`, puis redémarre l'application :
 ```json
 {"mcpServers": {"factures": {"command": "uv",
   "args": ["run", "--directory", "/chemin/absolu/vers/projet", "python", "serveur_mcp.py"]}}}
 ```
 
-**Tester :** `uv run pytest test_serveur_mcp.py` appelle chaque outil par le protocole MCP et vérifie
-les résultats et les refus (DROP, COPY, ATTACH, lecture de `.env`, requêtes multiples, injection).
+**Sans LLM, avec l'inspecteur MCP officiel (Node.js requis) :**
+```bash
+npx @modelcontextprotocol/inspector uv run python serveur_mcp.py
+```
+
+## 5. Structure du dépôt
+
+```
+projet/
+├── download_factures.py   étape 1 : S3 -> data/landing/
+├── classify_factures.py   étape 1 : détection texte / image
+├── ocr.py                 étapes 2-3 : rendu des pages, appel OCR, bronze incrémental
+├── silver.py              étape 4 : normalisation, parsing, contrôles qualité, quarantaine
+├── evaluation.py          étape 5 : échantillon, comparaison à la vérité terrain
+├── entrepot.py            étape 6 : vues DuckDB, connexion en lecture seule
+├── serveur_mcp.py         étape 7 : serveur MCP
+├── test_*.py              tests (uv run pytest)
+├── eval/                  vérité terrain, résultats, conversation MCP (versionnés)
+├── data/                  données générées (non versionnées) : landing, bronze, silver, entrepot.duckdb
+├── .env.example           modèle de configuration (copier en .env)
+├── .mcp.json              déclaration du serveur MCP pour Claude Code
+├── CONSIGNES.md           sujet du projet
+└── RAPPORT.md             rapport : choix, réponses aux questions, résultats
+```
+
+## 6. Dépannage
+
+| Symptôme | Solution |
+|---|---|
+| `KeyError: 'OCR_BASE_URL'` (ou une autre variable) | Il manque `--env-file .env`, ou la variable est vide dans `.env`. |
+| `ocr.py` : « No such file … manifest_factures.csv » | Lance d'abord `classify_factures.py`. |
+| `ocr.py` : `APIConnectionError` ou `401` | Vérifie l'URL et la clé de l'OCR. Les factures en erreur seront retraitées à la relance. |
+| « entrepot.duckdb n'existe pas » | `uv run python entrepot.py init` |
+| `No files found that match the pattern` | Les Parquet ont été déplacés, ou la base vient d'une autre machine : relance `entrepot.py init`. |
+| DBeaver : `Could not set lock on file` | Ajoute la propriété `duckdb.read_only = true` à la connexion. |
+| `/mcp` affiche `failed` | Lance `uv run python serveur_mcp.py` à la main pour voir l'erreur. Vérifie aussi que l'entrepôt existe. |
+| Le serveur MCP n'apparaît pas dans Claude Code | Lance `claude` **dans `projet/`**. Si tu l'as refusé, utilise `claude mcp reset-project-choices`. |
