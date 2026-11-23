@@ -23,7 +23,8 @@ from pathlib import Path
 
 import duckdb
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+PROJET = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("DATA_DIR", PROJET / "data"))  # relatif au projet, pas au dossier courant
 ENTREPOT = Path(os.environ.get("ENTREPOT", DATA_DIR / "entrepot.duckdb"))
 
 # (schéma, vue) -> (fichiers Parquet relatifs à DATA_DIR, description)
