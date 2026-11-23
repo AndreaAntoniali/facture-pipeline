@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 
 client = OpenAI(base_url=os.environ["OCR_BASE_URL"], api_key=os.environ["OCR_API_KEY"])
 MODEL = os.environ["OCR_MODEL"]
-LONGEST_EDGE = int(os.environ.get("OCR_LONGEST_EDGE", 800))   # résolution envoyée à l'OCR
+LONGEST_EDGE = int(os.environ.get("OCR_LONGEST_EDGE", 1540))   # résolution envoyée à l'OCR
 BUCKET = os.environ.get("S3_BUCKET", "factures")
 LANDING = Path(os.environ.get("OUT_DIR", "data/landing/factures"))
 MANIFEST = LANDING.parent / "manifest_factures.csv"      # écrit par classify_factures.py
