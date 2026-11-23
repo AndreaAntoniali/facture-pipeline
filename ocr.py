@@ -12,7 +12,7 @@ MODEL = os.environ["OCR_MODEL"]
 LONGEST_EDGE = 800
 LANDING = Path(os.environ.get("OUT_DIR", "data/landing/factures"))
 MANIFEST = LANDING.parent.parent / "bronze" / "manifest_factures.csv"
-EXTRACT_DIR = MANIFEST.parent / "extractions" / "test"
+EXTRACT_DIR = MANIFEST.parent / "extractions"
 
 def render_page(page: pymupdf.Page) -> bytes:
     zoom = LONGEST_EDGE / max(page.rect.width, page.rect.height)
@@ -71,7 +71,7 @@ def extract_facture(row: dict) -> None:
 def main():
     EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
     erreurs = []
-    a = factures()[:5]
+    a = factures()
     # TODO parallélisation : remplacer cette boucle séquentielle (~6 s par page) par un
     # ThreadPoolExecutor(max_workers=N) qui soumet extract_facture(row) pour chaque facture.
     # Les appels OCR attendent le réseau, donc des threads suffisent, et le serveur vLLM
