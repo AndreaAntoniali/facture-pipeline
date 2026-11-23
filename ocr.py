@@ -9,10 +9,10 @@ import json
 from datetime import datetime, timezone
 client = OpenAI(base_url=os.environ["OCR_BASE_URL"], api_key=os.environ["OCR_API_KEY"])
 MODEL = os.environ["OCR_MODEL"]
-LONGEST_EDGE = 1540
+LONGEST_EDGE = 800
 LANDING = Path(os.environ.get("OUT_DIR", "data/landing/factures"))
 MANIFEST = LANDING.parent.parent / "bronze" / "manifest_factures.csv"
-OCR_DIR = MANIFEST.parent / "ocr"
+EXTRACT_DIR = MANIFEST.parent / "extractions" / "test"
 
 def render_page(page: pymupdf.Page) -> bytes:
     zoom = LONGEST_EDGE / max(page.rect.width, page.rect.height)
@@ -35,45 +35,51 @@ def ocr_image(png: bytes) -> tuple[str, float]:
 
 
 
-def factures_image() -> list[dict]:
+def factures() -> list[dict]:
     with MANIFEST.open() as f:
-        return [row for row in csv.DictReader(f) if row["type"] == "image"]
+        return list(csv.DictReader(f))          # toutes, plus seulement "image"
 
-def ocr_facture(row: dict) -> None:
-    out = OCR_DIR / f"{row['sha256']}.json"
+def extract_facture(row: dict) -> None:
+    out = EXTRACT_DIR / f"{row['sha256']}.json"
     if out.exists():                      # déjà traité : on ne refait pas d'appel OCR
         print("déjà fait :", row["fichier"])
         return
 
+    natif = row["type"] == "texte"
     pages = []
     with pymupdf.open(LANDING / row["fichier"]) as doc:
         for i, page in enumerate(doc, start=1):
-            texte, duree = ocr_image(render_page(page))
+            if natif:
+                start = time.perf_counter()
+                texte = page.get_text()             # extraction native, aucun appel réseau
+                duree = time.perf_counter() - start
+            else:
+                texte, duree = ocr_image(render_page(page))
             pages.append({"page": i, "texte": texte, "duree_s": round(duree, 2)})
 
     out.write_text(json.dumps({
         "fichier": row["fichier"],
         "sha256": row["sha256"],
-        "methode": "ocr",
-        "modele": MODEL,
-        "longest_edge": LONGEST_EDGE,
+        "methode": "texte" if natif else "ocr",
+        "modele": None if natif else MODEL,
+        "longest_edge": None if natif else LONGEST_EDGE,
         "date_extraction": datetime.now(timezone.utc).isoformat(),
         "pages": pages,
     }, ensure_ascii=False, indent=2))
     print("ok :", row["fichier"], [p["duree_s"] for p in pages])
 
 def main():
-    OCR_DIR.mkdir(parents=True, exist_ok=True)
+    EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
     erreurs = []
-    a = factures_image()
+    a = factures()[:5]
     # TODO parallélisation : remplacer cette boucle séquentielle (~6 s par page) par un
-    # ThreadPoolExecutor(max_workers=N) qui soumet ocr_facture(row) pour chaque facture.
+    # ThreadPoolExecutor(max_workers=N) qui soumet extract_facture(row) pour chaque facture.
     # Les appels OCR attendent le réseau, donc des threads suffisent, et le serveur vLLM
     # traite ensemble les requêtes qui arrivent en même temps.
     # Garder le try/except pour chaque facture : une erreur ne doit pas arrêter les autres.
     for row in a:
         try:
-            ocr_facture(row)
+            extract_facture(row)
         except Exception as e:            # service OCR indisponible, timeout, PDF illisible…
             print("ERREUR :", row["fichier"], repr(e))
             erreurs.append(row["fichier"])
