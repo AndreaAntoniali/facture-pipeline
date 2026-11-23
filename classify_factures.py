@@ -11,12 +11,13 @@ Lancement :
 import csv
 import hashlib
 import sys
+import os 
 from collections import Counter
 from pathlib import Path
 
 import pymupdf
 
-IN_DIR = Path(sys.argv[1] if len(sys.argv) > 1 else "data/bronze/factures")
+IN_DIR = Path(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("OUT_DIR", "data/landing/factures"))
 MANIFEST = IN_DIR.parent / "manifest_factures.csv"
 
 

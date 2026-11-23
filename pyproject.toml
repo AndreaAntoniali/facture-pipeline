@@ -4,5 +4,6 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.44.9",
+    "openai>=3.57.0",
     "pymupdf>=2.1",
 ]
